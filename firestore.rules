@@ -1,0 +1,125 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Helper Functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isValidUrl(url) {
+      return url is string && (url.matches("^https://.*") || url.matches("^http://.*"));
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && 
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin' ||
+         (request.auth.token.email == "rihadahmedsunny@gmail.com" && request.auth.token.email_verified == true));
+    }
+
+    function isValidServer(data) {
+      return data.name is string && data.name.size() > 0 && data.name.size() < 100 &&
+             data.javaIp is string && data.javaIp.size() > 0 && data.javaIp.size() < 100 &&
+             (!('bedrockIp' in data) || (data.bedrockIp is string && data.bedrockIp.size() < 100)) &&
+             (!('bedrockPort' in data) || (data.bedrockPort is int && data.bedrockPort >= 0 && data.bedrockPort <= 65535)) &&
+             (!('motd' in data) || (data.motd is string && data.motd.size() < 100)) &&
+             (!('motdColor' in data) || (data.motdColor is string && data.motdColor.matches('^#[0-9a-fA-F]{6}$'))) &&
+             (!('discordUrl' in data) || (data.discordUrl is string && isValidUrl(data.discordUrl) && data.discordUrl.size() < 150)) &&
+             data.mode is list && data.mode.size() > 0 && data.mode.size() <= 5 &&
+             data.mode.hasOnly(['Survival', 'PvP', 'FFA', 'Skyblock', 'Creative', 'Factions', 'Prison', 'Lifesteal', 'Anarchy', 'Minigames', 'Hardcore', 'SMP', 'Parkour', 'Bedwars', 'Skywars', 'OneBlock', 'Earth', 'Towny', 'Roleplay', 'KitPvP', 'BoxPvP', 'Vanilla', 'Modded', 'Pixelmon', 'Cobblemon', 'Gens', 'Slimefun', 'Build Battle', 'Murder Mystery', 'Hide and Seek', 'TNT Run', 'Eggwars', 'Duels', 'Practice', 'UHC', 'Speedrun', 'Survival Games']) &&
+             data.version is string && data.version.size() > 0 &&
+             data.votes is int &&
+             (!('description' in data) || (data.description is string && data.description.size() < 500)) &&
+             (!('isOfficial' in data) || data.isOfficial is bool) &&
+             (!('createdBy' in data) || data.createdBy is string);
+    }
+
+    // Servers
+    match /servers/{serverId} {
+      allow read: if true;
+      allow create: if isAuthenticated() && isValidServer(request.resource.data) && 
+                    (request.resource.data.isOfficial == false || isAdmin());
+      allow update: if isAuthenticated() && 
+        (
+          // Allow voting (only votes field changes by 1)
+          (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['votes']) &&
+           math.abs(request.resource.data.votes - resource.data.votes) == 1) ||
+          // Allow admin to edit anything
+          isAdmin() ||
+          // Allow owner to edit their own server (except votes and isOfficial)
+          (resource.data.createdBy == request.auth.uid && 
+           !request.resource.data.diff(resource.data).affectedKeys().hasAny(['votes', 'isOfficial']))
+        );
+      allow delete: if isAdmin() || (resource.data.createdBy == request.auth.uid);
+    }
+
+    function isValidVote(data, userId) {
+      return data.userId == userId &&
+             data.serverId is string &&
+             data.timestamp == request.time;
+    }
+
+    // Votes (to track daily limits)
+    match /votes/{userId} {
+      allow read: if isAuthenticated();
+      allow create: if isOwner(userId) && isValidVote(request.resource.data, userId);
+      allow update: if isOwner(userId) && isValidVote(request.resource.data, userId) &&
+                    (request.time >= resource.data.timestamp + duration.value(24, 'h'));
+    }
+
+    // Chat
+    match /chat/{messageId} {
+      allow read: if true;
+      allow create: if isAuthenticated() && 
+                    request.resource.data.text is string && 
+                    request.resource.data.text.size() > 0 && 
+                    request.resource.data.text.size() < 300;
+    }
+
+    // Users
+    match /users/{userId} {
+      allow read: if isAuthenticated();
+      allow write: if isOwner(userId);
+    }
+
+    function isValidVideo(data) {
+      return data.title is string && data.title.size() > 0 && data.title.size() < 100 &&
+             data.url is string && isValidUrl(data.url) &&
+             (!('thumbnailUrl' in data) || (data.thumbnailUrl is string && isValidUrl(data.thumbnailUrl))) &&
+             data.likes is int &&
+             data.createdBy == request.auth.uid &&
+             data.authorName is string &&
+             data.createdAt == request.time;
+    }
+
+    // Videos
+    match /videos/{videoId} {
+      allow read: if true;
+      allow create: if isAuthenticated() && isValidVideo(request.resource.data);
+      allow update: if isAuthenticated() && 
+        (
+          // Allow liking (only likes field changes by 1)
+          (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['likes']) &&
+           math.abs(request.resource.data.likes - resource.data.likes) == 1) ||
+          // Allow owner to edit title/description
+          (resource.data.createdBy == request.auth.uid && 
+           request.resource.data.diff(resource.data).affectedKeys().hasAny(['title', 'description', 'thumbnailUrl'])) ||
+          isAdmin()
+        );
+      allow delete: if isAdmin() || (resource.data.createdBy == request.auth.uid);
+    }
+
+    // Video Likes
+    match /videoLikes/{likeId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && 
+                    request.resource.data.userId == request.auth.uid &&
+                    request.resource.data.videoId is string;
+      allow delete: if isAuthenticated() && resource.data.userId == request.auth.uid;
+    }
+  }
+}
